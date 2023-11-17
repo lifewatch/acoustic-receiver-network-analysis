@@ -5,6 +5,7 @@ Analysis of data from C-POD stations:
 3. Heatmap to visualize data per hour per day per year: heatmap.R
 4. NMDS & PERMANOVA: NMDS_PCA.R
 5. Cross correlation function for time series of tide and noise: cross_correlation_function.R
+6. Cleaning script - yearly export - cpod data.R
 
 # Passive Belgian acoustic receiver network (PBARN) analysis
 Analysis of data from acoustic receivers:
