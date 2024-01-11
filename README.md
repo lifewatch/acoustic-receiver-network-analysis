@@ -1,4 +1,4 @@
-# Belgian passive acoustic network (BPAN) analysis (C-POD network)
+# Belgian cetacean passive acoustic network (BCPAN) analysis (C-POD network)
 Analysis of data from C-POD stations:
 1. Data exploration & statistical tests: cpod_analysis.R
 2. Correlation of different variables (e.g. lost minutes, detection positive minutes (DPM), days of activity): correlation.R
@@ -6,6 +6,7 @@ Analysis of data from C-POD stations:
 4. NMDS & PERMANOVA: NMDS_PCA.R
 5. Cross correlation function for time series of tide and noise: cross_correlation_function.R
 6. Cleaning script - yearly export - cpod data.R
+7. Descriptive statistics from the C-POD data paper: BCPAN_descriptive_stats.R
 
 # Passive Belgian acoustic receiver network (PBARN) analysis
 Analysis of data from acoustic receivers:
