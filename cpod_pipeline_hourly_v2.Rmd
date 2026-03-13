@@ -1,0 +1,504 @@
+---
+title: "cpod_pipeline"
+author: "Arienne Calonge"
+date: "2025-08-01"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+
+knitr::opts_knit$set(root.dir = "C:/Users/arienne.calonge/OneDrive - VLIZ/Ari/CPOD_data") # change output directory
+
+library(tidyverse)
+library(lwdataexplorer)
+library(stringr)
+
+wd = "C:/Users/arienne.calonge/OneDrive - VLIZ/Ari/CPOD_data/" # change output directory
+```
+
+##### 1. DOWNLOAD AND CHECK DATA PER YEAR
+Hi and Mod data downloaded separately.
+```{r download data, echo=FALSE}
+# a. getCpodData parameters
+
+year = "2025"
+dataset_name = "Marco-Bolo" #assign a name to your dataset
+
+start_date = as.Date(paste0(year, "-05-15"))
+stop_date = as.Date(paste0(year,"-10-15"))
+date_interval = seq(start_date, length.out = 38, by="10 days")
+
+cpod_dataset = data.frame()
+
+for (i in 1:(length(date_interval)-1)){
+  cpodData = getCpodData(startdate= as.character(date_interval[i]), stopdate= as.character(date_interval[i+1]), processing='Raw', quality=c("Hi"), by="1 min")
+  cpod_dataset = dplyr::bind_rows(cpod_dataset,cpodData)
+  cpodData = getCpodData(startdate= as.character(date_interval[i]), stopdate= as.character(date_interval[i+1]), processing='Raw', quality=c("Mod"), by="1 min")
+  cpod_dataset = dplyr::bind_rows(cpod_dataset,cpodData)
+  save(cpod_dataset, file = paste0(wd,"RData/cpod_dataset_",year,".RData"))
+  print(i)
+}
+
+cpod_dataset <- cpod_dataset %>% distinct() %>% filter(as.Date(time) <= stop_date, species == "NBHF")
+
+#check & remove duplicates
+#any(duplicated(cpod_dataset))
+cpod_dataset <- distinct(cpod_dataset)
+save(cpod_dataset, file = paste0(wd,"RData/cpod_dataset_", year,"_", dataset_name, ".RData"))
+```
+
+
+```{r check data}
+year = "2025"
+file_path <- paste0(wd,"RData/cpod_dataset_", year,"_", dataset_name, ".RData")
+load(file_path)
+
+#make all column names lowercase
+names(cpod_dataset) <- tolower(names(cpod_dataset))
+
+# b. check data beyond valid_data_until_datetime
+cpod_dataset = cpod_dataset %>% mutate_at(c("time", "deploy_date_time", "recover_date_time", "valid_data_until_datetime"), ~as.POSIXct(.,tz="UTC", format="%Y-%m-%d %H:%M:%S"))
+data_after_valid_date = cpod_dataset %>% filter(time > valid_data_until_datetime)
+cpod_dataset = cpod_dataset %>% filter(time < valid_data_until_datetime)
+
+# c. Subset on project LifeWatch (delete other projects and filter to permanent stations and NBHF species)
+cpod_dataset<-subset(cpod_dataset, cpod_dataset$projectname=="Lifewatch")
+cpod_dataset <- cpod_dataset %>% filter(!str_detect(station, regex("AP|arms", ignore_case = TRUE)))
+cpod_dataset$species <- recode_factor(cpod_dataset$species,"NBHF"  = "Harbour porpoise")
+
+# d. delete rows with recorded = 0
+cpod_dataset = cpod_dataset[!cpod_dataset$recorded==0,]
+
+# e. remove temperature columns
+cpod_dataset$temperature_max = NULL
+cpod_dataset$temperature_min = NULL
+
+# f. check lost minutes - only for C-PODs
+if (any(cpod_dataset %>%
+          filter(grepl("C-POD", receiver), number_clicks_total < 4095) %>%
+          {.$Number_clicks_total < 4095} == TRUE)) {
+  message("Lost minutes exist for C-PODs when Number_clicks_total are < 4095.")
+}
+```
+
+
+```{r imis}
+##### 2. FORMAT DATA IN IMIS
+
+# rename columns
+cpod_dataset <- cpod_dataset %>% rename("Deployment_fk" = "deployment_fk", "Datetime..UTC." = "time", "Species" = "species", "Milliseconds" = "milliseconds", "Number_clicks_filtered" = "number_clicks_filtered", "Number_clicks_total" = "number_clicks_total", "Lost_minutes" = "lost_minutes", "Recorded" = "recorded", "Dpm" = "dpm", "Angle" = "angle", "Quality" = "quality", "Projectname" = "projectname", "Station"="station", "Latitude"="latitude", "Longitude"="longitude", "Mooring_type"="mooring_type", "Receiver"="receiver", "Deploy_date_time"="deploy_date_time", "Recover_date_time"="recover_date_time", "Valid_data_until_datetime"="valid_data_until_datetime")
+
+# a. aggregate Hi+Mod data
+cpod_dataset <- cpod_dataset %>%
+  group_by(Projectname, Station, Datetime..UTC.,
+           Latitude, Longitude, Mooring_type, Species,
+           Receiver, Deployment_fk,
+           Deploy_date_time, Recover_date_time, Valid_data_until_datetime) %>%
+  summarise(
+    Recorded = sum(Recorded, na.rm = TRUE),
+    Milliseconds = sum(Milliseconds, na.rm = TRUE),
+    Number_clicks_filtered = sum(Number_clicks_filtered, na.rm = TRUE),
+    Dpm = sum(Dpm, na.rm = TRUE),
+    Angle = median(Angle, na.rm = TRUE),
+    Lost_minutes = ifelse(any(Lost_minutes==1), 1, 0),
+    Number_clicks_total = mean(Number_clicks_total, na.rm = TRUE),
+    Quality = paste(unique(Quality), collapse = "+"),   # NEW
+    .groups = "drop"
+  )
+
+#Rename quality Hi+mod 
+unique(cpod_dataset$Quality)
+cpod_dataset$Quality <- "Hi+mod"
+
+# DPM & Recorded can only be 0 or 1 per minute
+cpod_dataset$Dpm<-ifelse(is.na(cpod_dataset$Dpm)| cpod_dataset$Dpm== 0, "0", "1")
+cpod_dataset$Dpm<-as.integer(cpod_dataset$Dpm)
+cpod_dataset$Recorded<-ifelse(is.na(cpod_dataset$Recorded)| cpod_dataset$Recorded== 0, "0", "1")
+cpod_dataset$Recorded<-as.integer(cpod_dataset$Recorded)
+
+# make sure there are no duplicates
+cpod_dataset <- distinct(cpod_dataset)
+
+# b. add standard names for stations = Zones (since we don't move stations anymore, zones = stations )
+cpod_dataset$Zone<-as.factor(cpod_dataset$Station)
+
+
+# c. reorder columns
+cpod_dataset = cpod_dataset %>% dplyr::select(Projectname, Station, Zone, Latitude, Longitude, 
+                                       Mooring_type,Species, Receiver, Quality, Datetime..UTC., Milliseconds, 
+                                       Number_clicks_filtered, Number_clicks_total, Lost_minutes,
+                                       Recorded, Dpm, Angle, Deployment_fk, Deploy_date_time, Recover_date_time, Valid_data_until_datetime)
+
+#check for NAs
+colSums(is.na(cpod_dataset))
+NAs = cpod_dataset[rowSums(is.na(cpod_dataset)) > 0,]
+#write_csv(NAs, "csv/Cetacean passive acoustic network 2023 - NAs.csv")
+
+#make sure midnight is with 00:00
+cpod_dataset$Datetime..UTC. <- format(cpod_dataset$Datetime..UTC., "%Y-%m-%d %H:%M:%S")
+
+# d. export data
+
+if(any(duplicated(names(cpod_dataset))) == TRUE | nrow(data_after_valid_date) > 0 | any(cpod_dataset$Deploy_date_time > cpod_dataset$Recover_date_time, na.rm=TRUE) == TRUE) { #field names must be unique AND there must be no NAs AND there must be no data after the valid_datetime
+  print("Final checks not satisfied. IMIS file cannot be exported.")
+} else {
+  write.csv(cpod_dataset,paste0(wd,"exports_2025/imis/minute/Cetacean passive acoustic network ",year,"_", dataset_name,".csv"), row.names = FALSE) 
+}
+
+```
+
+```{r hourly}
+#### 3. AGGREGATION OF DATA INTO HOURLY RESOLUTION
+
+#year = "2021"
+
+#load minute data
+#cpod_dataset <- read_csv(paste0(wd,"exports_2025/imis/minute/Cetacean passive acoustic network ",year,".csv"))
+
+# a. set datetime utc per hour
+
+cpod_dataset$min<-as.POSIXct(cpod_dataset$`Datetime..UTC.`, format = "%Y-%m-%d  %H:%M", tz="UTC")
+cpod_dataset$min60 <-as.POSIXlt(floor(as.numeric(cpod_dataset$min)/(60*60))*(60*60),origin=(as.POSIXlt('1970-01-01 00:00')), tz="UTC")
+cpod_dataset$min60<-as.POSIXct(cpod_dataset$min60 , format = "%Y-%m-%d  %H:%M:%S" , tz="UTC")
+
+# b. dataset aggregation per hour, sum most of the variables
+
+cpod_dataset <- cpod_dataset %>%
+  group_by(min60, Projectname, Station, Zone, Latitude, Longitude, Mooring_type,
+           Species, Receiver, Quality, Deployment_fk, Deploy_date_time,
+           Recover_date_time, Valid_data_until_datetime) %>%
+  summarise(
+    Recorded = sum(Recorded, na.rm = TRUE),
+    Lost_minutes = sum(Lost_minutes, na.rm = TRUE),
+    sumDpm = sum(Dpm, na.rm = TRUE),
+    Milliseconds = sum(Milliseconds, na.rm = TRUE),
+    Number_clicks_filtered = sum(Number_clicks_filtered, na.rm = TRUE),
+    Number_clicks_total = sum(Number_clicks_total, na.rm = TRUE),
+    Angle = median(Angle, na.rm = TRUE),   # <-- median here
+    .groups = "drop"
+  )
+
+#Rename min60 to Datetime (UTC)
+names(cpod_dataset)[names(cpod_dataset) == "min60"] <- "Datetime..UTC."
+
+# make sure there are no duplicates
+cpod_dataset <- distinct(cpod_dataset)
+
+### dpm wordt naar dph vertaald (vanaf dat je 1 positive dpm hebt is het uur ook positief), hier wordt g??n rekening gehouden of we een volledig uur gemeten hebben 
+cpod_dataset$Dph<- ifelse(is.na(cpod_dataset$sumDpm)| cpod_dataset$sumDpm== 0, "0", "1")
+cpod_dataset$Dph<-as.integer(cpod_dataset$Dph)
+
+#reorder columns to match dataset 2021
+cpod_dataset = cpod_dataset%>% dplyr::select(Projectname, Station, Zone, Latitude, Longitude, 
+                   Mooring_type,Species, Receiver, Quality, Datetime..UTC., Milliseconds, 
+                   Number_clicks_filtered, Number_clicks_total, Lost_minutes, Angle, 
+                   Recorded, sumDpm, Dph, Deployment_fk, Deploy_date_time, Recover_date_time, Valid_data_until_datetime)
+
+#make sure midnight is with 00:00
+cpod_dataset$Datetime..UTC. <- format(cpod_dataset$Datetime..UTC., "%Y-%m-%d %H:%M:%S")
+
+#check range of dates, recorded minutes & lost minutes & sumDPM should be max 60, NAs
+min(cpod_dataset$Datetime..UTC.)
+max(cpod_dataset$Datetime..UTC.)
+max(cpod_dataset$sumDpm)
+max(cpod_dataset$Recorded)
+max(cpod_dataset$Lost_minutes)
+unique(cpod_dataset$Dph)
+
+#check for NAs
+colSums(is.na(cpod_dataset))
+
+if (max(cpod_dataset$Recorded) > 60 | max(cpod_dataset$sumDpm) > 60 | max(cpod_dataset$Lost_minutes) > 60) {
+  print("Final checks not satisfied. File cannot be exported.")
+} else {
+  write.csv(cpod_dataset,paste0("exports_2025/imis/hourly/Cetacean passive acoustic network ",year," hourly.csv"), row.names = FALSE) 
+}
+```
+
+```{r dwca}
+##### 4. CONVERSION TO DWC-A by Jonas Mortelmans - hourly resolution
+
+#run this block if converting dataset of all years into one Darwin Core#
+cpod_list <- list()
+# Loop through the years 2014 to 2024
+for (year in 2014:2024) {
+  # Construct the file path for each year
+  file_path <- sprintf("exports_2025/imis/hourly/Cetacean passive acoustic network %d hourly.csv", year)
+  
+  # Read the CSV file and store it in the list
+  cpod_data <- read.csv(file_path, header = TRUE, sep = ',', fileEncoding = "latin1")
+  cpod_list[[as.character(year)]] <- cpod_data
+}
+
+save(cpod_list, file = paste0("RData/cpod_list_2014_2024.RData"))
+#Load saved data
+file_path <- paste0("RData/cpod_list_2014_2024.RData")
+load(paste0(wd,file_path))
+
+cpod_dataset <- bind_rows(cpod_list)
+
+# a. conform date fields
+
+cpod_dataset = cpod_dataset %>% mutate(Deploy_date_time = if_else(!str_detect(Deploy_date_time,':'), paste(as.character(Deploy_date_time), "00:00:00"), Deploy_date_time),
+                                      Valid_data_until_datetime = if_else(!str_detect(Valid_data_until_datetime,':'), paste(as.character(Valid_data_until_datetime), "00:00:00"), Valid_data_until_datetime)) 
+
+cpod_dataset$TIME <- as.POSIXlt(cpod_dataset$`Datetime..UTC.`, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+cpod_dataset$Deploy_date_time <- as.POSIXlt(cpod_dataset$Deploy_date_time, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+cpod_dataset$Valid_data_until_datetime <- as.POSIXlt(cpod_dataset$Valid_data_until_datetime, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+cpod_dataset$TIME_min <- format(as.POSIXlt(cpod_dataset$TIME), format ='%M')
+cpod_dataset$TIME_hour <- format(as.POSIXlt(cpod_dataset$TIME), format ='%H')
+cpod_dataset$DATE <- format(as.POSIXlt(cpod_dataset$TIME), format ='%Y-%m-%d')
+cpod_dataset$year <- format(as.POSIXlt(cpod_dataset$TIME), format ='%Y')
+cpod_dataset$month <- format(as.POSIXlt(cpod_dataset$TIME), format ='%m')
+cpod_dataset$day <- format(as.POSIXlt(cpod_dataset$TIME), format ='%d')
+
+#check NAs
+colSums(is.na(cpod_dataset))
+x = cpod_dataset[is.na(cpod_dataset$Recover_date_time),]
+
+# b. rename field names
+names(cpod_dataset)[names(cpod_dataset) == 'Latitude'] <- 'decimalLatitude'
+names(cpod_dataset)[names(cpod_dataset) == 'Longitude'] <- 'decimalLongitude'
+names(cpod_dataset)[names(cpod_dataset) == 'Dph'] <- 'occurrenceStatus'
+cpod_dataset$measurementValue<-cpod_dataset$occurrenceStatus
+cpod_dataset$occurrenceStatus<-ifelse(cpod_dataset$occurrenceStatus %in% '1', 'present', 'absent')
+names(cpod_dataset)[names(cpod_dataset) == 'Mooring_type'] <- 'eventRemarks'
+cpod_dataset$modified<- ''       #format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+cpod_dataset$bibliographicCitation<- ''
+cpod_dataset$Station <- gsub("bpns-", "", cpod_dataset$Station)
+cpod_dataset$Station <- gsub(" ", "", cpod_dataset$Station)
+names(cpod_dataset)[names(cpod_dataset) == 'Station'] <- 'locality'
+
+
+# c. add bibliography - add LifeWatch ?
+currentYear<-format(Sys.time(), "%Y")
+#cpod_dataset$bibliographicCitation<-paste0("Flanders Marine Institute (VLIZ), Belgium; (", currentYear, "): Permanent Cetacean passive acoustic sensor network in the Belgian Part of the North Sea.")
+
+
+# d. create eventID
+
+#event ID itself is: deployment no., a date and time)
+cpod_dataset$eventID <- paste0(cpod_dataset$Deployment_fk,"_", cpod_dataset$DATE, '_', cpod_dataset$TIME_hour)
+#eventDate should be start and stop of that specific hour!
+cpod_dataset$TIMEstart <-cpod_dataset$TIME
+cpod_dataset$TIMEstart <- format(as.POSIXlt(cpod_dataset$TIMEstart), format ='%Y-%m-%dT%H:%M:%S')
+cpod_dataset$TIMEstop <-cpod_dataset$TIME + hours(1)  
+cpod_dataset$TIMEstop <- format(as.POSIXlt(cpod_dataset$TIMEstop), format ='%Y-%m-%dT%H:%M:%S')
+cpod_dataset$eventDate <- paste0(cpod_dataset$TIMEstart, "Z/" , cpod_dataset$TIMEstop,"Z")
+cpod_dataset$parentEventID <- cpod_dataset$Deployment_fk
+cpod_dataset <- cpod_dataset %>% mutate(Deploy_date_time = format(as.POSIXlt(Deploy_date_time), format ='%Y-%m-%dT%H:%M:%S'),
+                                        Valid_data_until_datetime = format(as.POSIXlt(Valid_data_until_datetime), format ='%Y-%m-%dT%H:%M:%S')) 
+
+event_child <- cpod_dataset%>%
+  dplyr::select(eventID, eventDate, parentEventID) %>% mutate(parentEventID = as.character(parentEventID))
+
+#create parentEventID per unique deployment no. 
+parentEvent <- cpod_dataset %>% dplyr::select(Deployment_fk,locality, eventRemarks, Deploy_date_time, Valid_data_until_datetime, modified, bibliographicCitation, decimalLatitude, decimalLongitude, Receiver)
+
+parentEvent <- parentEvent %>% mutate(eventID = as.character(Deployment_fk), eventDate = paste0(Deploy_date_time,"Z/", Valid_data_until_datetime, "Z"),parentEventID = ifelse(grepl("C-POD", parentEvent$Receiver),"01_CPOD", "02_FPOD")) %>%  group_by(eventID) %>% dplyr::summarize(eventDate = unique(eventDate), locality = first(locality), parentEventID= first(parentEventID), eventRemarks = unique(eventRemarks), modified = first(modified), bibliographicCitation = first(bibliographicCitation), decimalLatitude= first(decimalLatitude), decimalLongitude= first(decimalLongitude),.groups="drop")
+
+# merge event and parentEvent
+event <- bind_rows(parentEvent, event_child)
+
+# e. Create a data frame with the provided data: automatically extract depth from emodnet
+
+#Bathymetry data can be retrieved from [Emodnet](http://portal.emodnet-bathymetry.eu/)
+#NOTE: emodnet uses negative depth values, while IPT uses absolute depth values.
+#So, the minimum depth in emodnet is actually the maximum depth when converted to an absolute value, vice versa. 
+#The lat and lon are rounded off 2 decimal places, to match the resolution of emodnet. All values are averaged.
+#If there is no min/max values for the station, we use the mean value instead for both min and max. 
+
+library(raster)
+
+r <- raster(paste0(wd,"metadata/emodnet_mindepth.asc"))
+bathy_max <- data.frame(coordinates(r))
+bathy_max$depth <- as.vector(r)
+
+r <- raster(paste0(wd,"metadata/emodnet_maxdepth.asc"))
+bathy_min <- data.frame(coordinates(r))
+bathy_min$depth <- as.vector(r)
+
+r <- raster(paste0(wd,"metadata/emodnet_meandepth.asc"))
+bathy_mean <- data.frame(coordinates(r))
+bathy_mean$depth <- as.vector(r)
+
+bathy.list = list(bathy_max, bathy_min, bathy_mean)
+
+for (i in 1:length(bathy.list)){
+  bathy.list[[i]] = bathy.list[[i]] %>% rename('decimalLongitude'='x', 'decimalLatitude'='y')
+  bathy.list[[i]]$decimalLongitude = as.numeric(sprintf(bathy.list[[i]]$decimalLongitude, fmt = '%#.2f'))
+  bathy.list[[i]]$decimalLatitude = as.numeric(sprintf(bathy.list[[i]]$decimalLatitude, fmt = '%#.2f'))
+  bathy.list[[i]]<-na.omit(bathy.list[[i]])
+  bathy.list[[i]] <- summarise(group_by(bathy.list[[i]], decimalLongitude, decimalLatitude),
+                     depth = mean(depth))
+  #Data contains also land data; outliers; missing data. Needs to be filtered out
+  bathy.list[[i]] <- bathy.list[[i]][between(bathy.list[[i]]$depth, -60,0), ]
+}
+
+bathy_max = bathy.list[[1]] %>% mutate(depth = abs(depth)) %>% rename("maximumDepthInMeters"="depth") 
+bathy_min = bathy.list[[2]] %>% mutate(depth = abs(depth)) %>% rename("minimumDepthInMeters"="depth")
+bathy_mean = bathy.list[[3]] %>% mutate(depth = abs(depth)) %>% rename("depth_mean"="depth")
+
+depths = cpod_dataset %>% dplyr::select(locality, decimalLatitude, decimalLongitude) %>% unique() %>% 
+            mutate(decimalLongitude_round=round(decimalLongitude,2), decimalLatitude_round=round(decimalLatitude,2))
+depths = left_join(depths, bathy_max, by = c("decimalLongitude_round" = "decimalLongitude", "decimalLatitude_round" = "decimalLatitude"))
+depths = left_join(depths, bathy_min, by = c("decimalLongitude_round" = "decimalLongitude", "decimalLatitude_round" = "decimalLatitude"))
+depths = left_join(depths, bathy_mean, by = c("decimalLongitude_round" = "decimalLongitude", "decimalLatitude_round" = "decimalLatitude"))
+depths = depths %>% mutate(maximumDepthInMeters = ifelse(is.na(maximumDepthInMeters), depth_mean, maximumDepthInMeters),
+                           minimumDepthInMeters = ifelse(is.na(minimumDepthInMeters), depth_mean, minimumDepthInMeters)) %>% 
+                    unique() %>% dplyr::select(locality, decimalLatitude, decimalLongitude, maximumDepthInMeters, minimumDepthInMeters)
+
+event<-merge(event, depths, by = c('locality', 'decimalLongitude', 'decimalLatitude'), all.x=TRUE)
+#event <-event[order(event$eventID),]
+
+# f. final checks before export of event
+
+#check duplicates
+x<-event[duplicated(event$eventID), ]
+#remove duplicates
+event<-event[!duplicated(event$eventID), ]
+
+# add parentEventID
+parentEventID_rows <- data.frame(
+  eventID  = c("01_CPOD", "02_FPOD"),
+  modified   = c(format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), format(Sys.time(), "%Y-%m-%dT%H:%M:%S")),
+  bibliographicCitation = c(paste0("Flanders Marine Institute (VLIZ), Belgium; (", currentYear, "): Permanent Cetacean passive acoustic sensor network in the Belgian Part of the North Sea.")),
+  datasetName = "LifeWatch observatory data: permanent Cetacean passive acoustic sensor network in the Belgian Part of the North Sea",
+  institutionCode = "Flanders Marine Institute (VLIZ)",
+  eventDate = c("2014-06-23T08:00:00Z/2024-12-31T23:00:00Z", "2022-10-17T09:00:00Z/2024-12-31T23:00:00Z"),
+  stringsAsFactors = FALSE
+)
+event <- bind_rows(parentEventID_rows, event)
+
+# replace NAs with blank in event
+event[is.na(event)] <- ""
+
+
+# we only export if the final checks are satisfied
+if (any(colSums(is.na(event))) == TRUE | any(duplicated(names(event))) == TRUE) { #field names must be unique AND there must be no NAs
+  print("Final checks not satisfied. Event file cannot be exported.")
+} else {
+  write.csv(event,paste0(wd, "exports_2025/ipt/obisevent.csv"), row.names = FALSE) #first file uploaded in IPT
+}
+
+
+# g. create occurrence file: identical to event, but without the parents (no occurrences there)
+cpod_dataset$occurrenceID <- paste0(cpod_dataset$eventID,"_Cetacean")
+occurrence <- cpod_dataset%>%
+  dplyr::select(eventID, occurrenceID, occurrenceStatus) 
+
+#make sure there are no duplicates 
+occurrence<-occurrence[!duplicated(occurrence$occurrenceID), ]
+
+# replace NAs with blank 
+occurrence[is.na(occurrence)] <- ""
+
+# add scientificName and scientificNameID 
+occurrence$scientificName <- "Phocoena phocoena"
+occurrence$scientificNameID <- "urn:lsid:marinespecies.org:taxname:137117"
+
+if (any(colSums(is.na(occurrence))) == TRUE | any(duplicated(names(occurrence))) == TRUE) { #field names must be unique AND there must be no NAs
+  print("Final checks not satisfied. Occurrence file cannot be exported.")
+} else {
+  write.csv(occurrence,paste0(wd, "exports_2025/ipt/obisoccurrence.csv"), row.names = FALSE) #second file uploaded in IPT
+}
+
+
+# h. create extensions file
+
+#names(cpod_dataset)[names(cpod_dataset) == 'eventRemarks'] <- 'measurementsRemarks'
+cpod_dataset$measurementType<-''
+cpod_dataset$measurementTypeID<-''
+cpod_dataset$measurementValueID<-''
+cpod_dataset$measurementMethod<-''
+cpod_dataset$measurementUnit<-''
+
+emof <- cpod_dataset%>%
+  dplyr::select(eventID, occurrenceID, Receiver, Recorded, sumDpm, Number_clicks_filtered, Number_clicks_total, measurementType, measurementTypeID, measurementValue, measurementValueID, measurementMethod, measurementUnit) %>% mutate(eventID = as.character(eventID))
+emof<-emof[!duplicated(emof$occurrenceID), ] #this is the extension data file, add temperature, add data if FPOD or CPOD 
+
+emofSampling <-emof
+emofRecorded <-emof
+emofDPM <-emof
+emofNumberClicksFiltered <-emof
+emofNumberClicksTotal <-emof
+#emofMeasurementMethod <- emof
+
+#emof recorded
+emofRecorded$measurementType <- 'Recorded minutes'
+emofRecorded$measurementValue <- emofRecorded$Recorded
+emofRecorded$measurementUnit <- 'minute'
+
+#emof DPM
+emofDPM$measurementType <- 'sum of Detection Positive Minutes'
+emofDPM$measurementValue <- emofDPM$sumDpm
+emofDPM$measurementUnit <- 'minute' 
+
+#emof Number Clicks Filtered
+emofNumberClicksFiltered$measurementType <- "Number of filtered clicks"
+emofNumberClicksFiltered$measurementValue <- emofNumberClicksFiltered$Number_clicks_filtered
+emofNumberClicksFiltered$measurementUnit <- 'clicks'
+
+#emof Number Clicks Total
+emofNumberClicksTotal$measurementType <- 'Total number of clicks'
+emofNumberClicksTotal$measurementValue <- emofNumberClicksTotal$Number_clicks_total
+emofNumberClicksTotal$measurementUnit <- 'clicks'
+
+#emofMeasurementMethod (i left out method, file too large)
+emof <- rbind(emofRecorded, emofDPM, emofNumberClicksFiltered, emofNumberClicksTotal)
+
+emof <-emof[order(emof$occurrenceID),]
+emof <- subset(emof, select = -c(Receiver, Recorded, sumDpm, Number_clicks_filtered, Number_clicks_total))
+
+# add emof sampling through parentEventID
+# add parentEventID
+parentEventID_rows <- data.frame(
+  eventID  = c("01_CPOD", "02_FPOD"),
+  measurementTypeID = c('http://vocab.nerc.ac.uk/collection/P01/current/NMSPINST/',''),
+  measurementType   = 'Name of sampling instrument', 
+  measurementValue = c("Chelonia C-POD porpoise detector", "Chelonia F-POD porpoise detector"),
+  measurementValueID = c('http://vocab.nerc.ac.uk/collection/L22/current/TOOL1473/',''),
+  measurementMethod = 'KERNO classified narrow-band high frequency click trains',
+  stringsAsFactors = FALSE
+)
+
+emof$measurementValue <- as.character(emof$measurementValue)
+emof <- bind_rows(parentEventID_rows, emof)
+
+# replace NAs with blank 
+emof[is.na(emof)] <- ""
+
+if (any(colSums(is.na(emof))) == TRUE | any(duplicated(names(emof))) == TRUE) { #field names must be unique AND there must be no NAs
+  print("Final checks not satisfied. Occurrence file cannot be exported.")
+} else {
+  write.csv(emof,paste0(wd, "exports_2025/ipt/obisemof.csv"), row.names = FALSE) #final file uploaded in IPT
+}
+
+```
+
+```{r dwca check}
+##### 5. Check OBIS files generated
+
+# load dwca files
+event <- read_csv(paste0(wd,"exports_2025/ipt/obisevent.csv"))
+occurrence <- read_csv(paste0(wd,"exports_2025/ipt/obisoccurrence.csv"))
+emof <- read_csv(paste0(wd,"exports_2025/ipt/obisemof.csv"))
+
+cpod_dataset <- load(paste0("RData/cpod_list_2014_2024.RData"))
+cpod_dataset <- bind_rows(cpod_list)
+
+
+occurrence %>% filter(occurrenceStatus=="present") %>% nrow()
+unique(event$locality)
+
+file_path <- paste0(wd,"RData/cpod_list_2014_2024.RData")
+load(file_path)
+cpod_dataset <- bind_rows(cpod_list)
+
+NAs = cpod_dataset[rowSums(is.na(cpod_dataset)) > 0,]
+write.csv(NAs,paste0("exports_2025/NAs.csv"), row.names = FALSE)
+
+# filter C-POD and F-POD events
+x <- event %>% filter(parentEventID=="01_CPOD")
+x <- event %>% filter(parentEventID=="02_FPOD")
+```
