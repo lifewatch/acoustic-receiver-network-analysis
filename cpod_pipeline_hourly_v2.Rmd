@@ -53,7 +53,7 @@ year = "2025"
 file_path <- paste0(wd,"RData/cpod_dataset_", year,"_", dataset_name, ".RData")
 load(file_path)
 
-#make all column names lowercase
+# a. make all column names lowercase
 names(cpod_dataset) <- tolower(names(cpod_dataset))
 
 # b. check data beyond valid_data_until_datetime
@@ -69,11 +69,7 @@ cpod_dataset$species <- recode_factor(cpod_dataset$species,"NBHF"  = "Harbour po
 # d. delete rows with recorded = 0
 cpod_dataset = cpod_dataset[!cpod_dataset$recorded==0,]
 
-# e. remove temperature columns
-cpod_dataset$temperature_max = NULL
-cpod_dataset$temperature_min = NULL
-
-# f. check lost minutes - only for C-PODs
+# e. check lost minutes - only for C-PODs
 if (any(cpod_dataset %>%
           filter(grepl("C-POD", receiver), number_clicks_total < 4095) %>%
           {.$Number_clicks_total < 4095} == TRUE)) {
@@ -86,7 +82,7 @@ if (any(cpod_dataset %>%
 ##### 2. FORMAT DATA IN IMIS
 
 # rename columns
-cpod_dataset <- cpod_dataset %>% rename("Deployment_fk" = "deployment_fk", "Datetime..UTC." = "time", "Species" = "species", "Milliseconds" = "milliseconds", "Number_clicks_filtered" = "number_clicks_filtered", "Number_clicks_total" = "number_clicks_total", "Lost_minutes" = "lost_minutes", "Recorded" = "recorded", "Dpm" = "dpm", "Angle" = "angle", "Quality" = "quality", "Projectname" = "projectname", "Station"="station", "Latitude"="latitude", "Longitude"="longitude", "Mooring_type"="mooring_type", "Receiver"="receiver", "Deploy_date_time"="deploy_date_time", "Recover_date_time"="recover_date_time", "Valid_data_until_datetime"="valid_data_until_datetime")
+cpod_dataset <- cpod_dataset %>% rename("Deployment_fk" = "deployment_fk", "Datetime..UTC." = "time", "Species" = "species", "Milliseconds" = "milliseconds", "Number_clicks_filtered" = "number_clicks_filtered", "Number_clicks_total" = "number_clicks_total", "Lost_minutes" = "lost_minutes", "Recorded" = "recorded", "Dpm" = "dpm", "Angle" = "angle", "Quality" = "quality", "Projectname" = "projectname", "Station"="station", "Latitude"="latitude", "Longitude"="longitude", "Mooring_type"="mooring_type", "Receiver"="receiver", "Deploy_date_time"="deploy_date_time", "Recover_date_time"="recover_date_time", "Valid_data_until_datetime"="valid_data_until_datetime", "Temperature_max"="temperature_max", "Temperature_min"="temperature_min" )
 
 # a. aggregate Hi+Mod data
 cpod_dataset <- cpod_dataset %>%
@@ -116,14 +112,27 @@ cpod_dataset$Dpm<-as.integer(cpod_dataset$Dpm)
 cpod_dataset$Recorded<-ifelse(is.na(cpod_dataset$Recorded)| cpod_dataset$Recorded== 0, "0", "1")
 cpod_dataset$Recorded<-as.integer(cpod_dataset$Recorded)
 
-# make sure there are no duplicates
+# b. verify temperature doesn't jump 2 or more degrees between consecutive minutes of the same deployment. sometimes, there is a jump and this means that the data jumps from correct and current data to old data
+for (i in 1:n_distinct(cpod_dataset$Deployment_fk)){
+  deployment_n = as.numeric(unique(cpod_dataset$Deployment_fk)[i])
+  data_deploy = cpod_dataset %>% filter(Deployment_fk == deployment_n) %>% 
+                                  arrange(Datetime..UTC.) 
+  result = if_else(all(diff(data_deploy$Temperature_min) >= 2), paste0(deployment_n, "= temp check FAIL"), paste0(deployment_n, "= temp check passed"))
+  print(result) #prints each deployment number 
+}
+
+# remove temperature columns
+cpod_dataset$Temperature_min = NULL
+cpod_dataset$Temperature_max = NULL
+
+# c. make sure there are no duplicates
 cpod_dataset <- distinct(cpod_dataset)
 
-# b. add standard names for stations = Zones (since we don't move stations anymore, zones = stations )
+# d. add standard names for stations = Zones (since we don't move stations anymore, zones = stations )
 cpod_dataset$Zone<-as.factor(cpod_dataset$Station)
 
 
-# c. reorder columns
+# e. reorder columns
 cpod_dataset = cpod_dataset %>% dplyr::select(Projectname, Station, Zone, Latitude, Longitude, 
                                        Mooring_type,Species, Receiver, Quality, Datetime..UTC., Milliseconds, 
                                        Number_clicks_filtered, Number_clicks_total, Lost_minutes,
@@ -137,7 +146,7 @@ NAs = cpod_dataset[rowSums(is.na(cpod_dataset)) > 0,]
 #make sure midnight is with 00:00
 cpod_dataset$Datetime..UTC. <- format(cpod_dataset$Datetime..UTC., "%Y-%m-%d %H:%M:%S")
 
-# d. export data
+# f. export data
 
 if(any(duplicated(names(cpod_dataset))) == TRUE | nrow(data_after_valid_date) > 0 | any(cpod_dataset$Deploy_date_time > cpod_dataset$Recover_date_time, na.rm=TRUE) == TRUE) { #field names must be unique AND there must be no NAs AND there must be no data after the valid_datetime
   print("Final checks not satisfied. IMIS file cannot be exported.")
